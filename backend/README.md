@@ -121,11 +121,15 @@ target stack, not just this local dev shortcut):
 1. `docker compose up -d` from the repo root (starts Postgres, MinIO, Redis — already configured
    in `docker-compose.yml`).
 2. Restore `prisma/schema.prisma`'s `datasource` block to `provider = "postgresql"` and add back
-   the `@db.Uuid` / `@db.Decimal(x,y)` / `@db.Date` native type attributes and `String[]` array
-   fields — either from git history (this file was SQLite-ified in one commit) or by re-reading
-   `../docs/database-design.md` §3, which documents the original Postgres-native design directly.
-   `Decimal` fields also need their corresponding code call sites updated back from plain `number`
-   handling to `Prisma.Decimal`/`.toNumber()` (see `src/modules/results/results.service.ts`).
+   the `@db.Uuid` / `@db.Decimal(x,y)` / `@db.Date` native type attributes, the `String[]` array
+   fields, and the `Json`/`Json?` fields (currently JSON-encoded `String`/`String?` — see the
+   schema file's header note for the full list of 8 affected columns) — either from git history
+   (this file was SQLite-ified across two commits) or by re-reading `../docs/database-design.md`
+   §3, which documents the original Postgres-native design directly. `Decimal` fields also need
+   their corresponding code call sites updated back from plain `number` handling to
+   `Prisma.Decimal`/`.toNumber()` (see `src/modules/results/results.service.ts`), and the
+   `String`-encoded JSON fields can drop the `toJsonString`/`fromJsonString` calls (see
+   `src/common/utils/json.util.ts`) since Postgres's native `Json` type round-trips automatically.
 3. Update `.env`'s `DATABASE_URL` to the Postgres connection string (commented out in
    `.env.example`).
 4. Re-run `npx prisma migrate dev`.

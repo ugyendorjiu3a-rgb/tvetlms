@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { decodeStringArray } from '../../common/utils/json-array.util';
+import { fromJsonString } from '../../common/utils/json.util';
 import { CreateCommentDto, CreateSubmissionDto } from './dto/submission.dto';
 
 // Implements the Trainee Submission Journey (ui-ux-flow.md §5.1) and the Upload step of the
@@ -101,7 +102,21 @@ export class SubmissionsService {
       include: { files: true, grade: { include: { autoGradeLog: true } }, comments: true, assignment: true },
     });
     await this.assertCanView(submission, actor);
-    return withDecodedAssignment(submission);
+
+    // autoGradeLog.rawResult is a JSON-encoded string in local SQLite dev mode (see
+    // schema.prisma header note) — decode it back to an object for the API response.
+    const decodedGrade =
+      submission.grade?.autoGradeLog
+        ? {
+            ...submission.grade,
+            autoGradeLog: {
+              ...submission.grade.autoGradeLog,
+              rawResult: fromJsonString(submission.grade.autoGradeLog.rawResult),
+            },
+          }
+        : submission.grade;
+
+    return withDecodedAssignment({ ...submission, grade: decodedGrade });
   }
 
   async findForTrainee(traineeId: string) {

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { toJsonSafe } from '../../common/utils/json.util';
+import { toNullableJsonString } from '../../common/utils/json.util';
 
 export interface AuditLogInput {
   actorId?: string | null;
@@ -30,8 +30,8 @@ export class AuditService {
         action: input.action,
         entityType: input.entityType,
         entityId: input.entityId ?? null,
-        beforeValue: toJsonSafe(input.beforeValue),
-        afterValue: toJsonSafe(input.afterValue),
+        beforeValue: toNullableJsonString(input.beforeValue),
+        afterValue: toNullableJsonString(input.afterValue),
         ipAddress: input.ipAddress ?? null,
         institutionId: input.institutionId ?? null,
       },

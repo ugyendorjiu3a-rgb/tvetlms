@@ -1,8 +1,21 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { SyncConflict } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
+import { fromJsonString } from '../../common/utils/json.util';
 import { RegisterDeviceDto, ResolveConflictDto } from './dto/sync.dto';
+
+// serverVersionSnapshot/clientVersionSnapshot are JSON-encoded strings in local SQLite dev mode
+// (see schema.prisma header note) — decode them back to objects for the API response, so the
+// Sync Conflict Queue UI (ui-ux-flow.md §2.7/§3.4) can render both versions side-by-side.
+function toApiConflict<T extends SyncConflict>(conflict: T) {
+  return {
+    ...conflict,
+    serverVersionSnapshot: fromJsonString(conflict.serverVersionSnapshot),
+    clientVersionSnapshot: fromJsonString(conflict.clientVersionSnapshot),
+  };
+}
 
 // Scope note: the dedicated feature endpoints (submissions.submit, grading.manualGrade, etc.) ARE
 // the sync ingestion points — they already accept a client-generated id, originDeviceId, and (for
@@ -26,11 +39,12 @@ export class SyncService {
     });
   }
 
-  listOpenConflicts() {
-    return this.prisma.syncConflict.findMany({
+  async listOpenConflicts() {
+    const conflicts = await this.prisma.syncConflict.findMany({
       where: { status: 'open' },
       orderBy: { createdAt: 'asc' },
     });
+    return conflicts.map(toApiConflict);
   }
 
   async resolveConflict(conflictId: string, dto: ResolveConflictDto, actor: AuthenticatedUser) {
@@ -46,8 +60,12 @@ export class SyncService {
 
     const snapshot =
       dto.resolution === 'keep_server'
-        ? (conflict.serverVersionSnapshot as { score: string | number })
-        : (conflict.clientVersionSnapshot as { score: string | number });
+        ? fromJsonString<{ score: string | number }>(conflict.serverVersionSnapshot)
+        : fromJsonString<{ score: string | number }>(conflict.clientVersionSnapshot);
+
+    if (!snapshot) {
+      throw new BadRequestException('Stored conflict snapshot could not be read');
+    }
 
     const grade = await this.prisma.grade.update({
       where: { id: conflict.entityId },
@@ -75,11 +93,11 @@ export class SyncService {
       action: 'sync_conflict.resolve',
       entityType: 'grade',
       entityId: grade.id,
-      beforeValue: conflict,
+      beforeValue: toApiConflict(conflict),
       afterValue: { grade, resolution: dto.resolution },
     });
 
-    return resolved;
+    return toApiConflict(resolved);
   }
 
   async getStatus(userId: string) {

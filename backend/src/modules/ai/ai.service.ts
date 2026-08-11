@@ -1,8 +1,16 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { AiRecommendationLog } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
+import { fromJsonString, toJsonString, toNullableJsonString } from '../../common/utils/json.util';
 import { CreateAiRecommendationDto } from './dto/ai-recommendation.dto';
+
+// suggestion/inputDataRef are JSON-encoded strings in local SQLite dev mode (see schema.prisma
+// header note) — decode them back to objects for the API response.
+function toApiSuggestion<T extends AiRecommendationLog>(log: T) {
+  return { ...log, suggestion: fromJsonString(log.suggestion), inputDataRef: fromJsonString(log.inputDataRef) };
+}
 
 // The AI Gateway boundary from architecture.md §9: AI output lands here as a Suggestion, never
 // writes directly to grades/certification/policy tables, and requires an explicit human
@@ -22,8 +30,8 @@ export class AiService {
       data: {
         traineeId: dto.traineeId,
         recommendationType: dto.recommendationType,
-        suggestion: dto.suggestion,
-        inputDataRef: dto.inputDataRef,
+        suggestion: toJsonString(dto.suggestion),
+        inputDataRef: toNullableJsonString(dto.inputDataRef),
         modelVersion: dto.modelVersion,
         status: 'pending',
       },
@@ -37,14 +45,15 @@ export class AiService {
       afterValue: suggestion,
     });
 
-    return suggestion;
+    return toApiSuggestion(suggestion);
   }
 
-  listPending(traineeId?: string) {
-    return this.prisma.aiRecommendationLog.findMany({
+  async listPending(traineeId?: string) {
+    const logs = await this.prisma.aiRecommendationLog.findMany({
       where: { status: 'pending', traineeId },
       orderBy: { generatedAt: 'desc' },
     });
+    return logs.map(toApiSuggestion);
   }
 
   async decide(id: string, decision: 'accepted' | 'rejected', actor: AuthenticatedUser) {
@@ -67,6 +76,6 @@ export class AiService {
       afterValue: updated,
     });
 
-    return updated;
+    return toApiSuggestion(updated);
   }
 }

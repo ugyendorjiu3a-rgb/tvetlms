@@ -15,6 +15,13 @@
 //     `String` columns instead — SQLite has no native array type. See
 //     src/common/utils/json-array.util.ts for the serialize/deserialize helpers; API request/
 //     response shapes are unchanged (still plain string arrays over HTTP).
+//   - `Json`/`Json?` fields (AutoGradeLog.rawResult, SyncQueueItem.payload,
+//     SyncConflict.serverVersionSnapshot/clientVersionSnapshot, AuditLog.beforeValue/afterValue,
+//     AiRecommendationLog.inputDataRef/suggestion) are JSON-encoded `String`/`String?` columns
+//     instead — the SQLite connector doesn't support the `Json` scalar type at all (only
+//     PostgreSQL/MySQL/SQL Server/MongoDB/CockroachDB do; `prisma migrate dev` fails schema
+//     validation otherwise). See src/common/utils/json.util.ts for the serialize/deserialize
+//     helpers; API request/response shapes are unchanged (still plain JSON objects over HTTP).
 //   - Postgres-only native type attributes (`@db.Uuid`, `@db.Decimal(x,y)`, `@db.Date`) are
 //     removed; IDs are still UUID strings (Prisma generates them client-side via `@default(uuid())`,
 //     which isn't Postgres-specific), just without the native column type annotation.
@@ -398,7 +405,7 @@ model AutoGradeLog {
   id            String   @id @default(uuid())
   submissionId  String   @map("submission_id")
   engineVersion String   @map("engine_version")
-  rawResult     Json     @map("raw_result") // per-question breakdown for MCQ
+  rawResult     String   @map("raw_result") // JSON-encoded per-question breakdown for MCQ — see json.util.ts header note
   gradedAt      DateTime @default(now()) @map("graded_at")
 
   grades Grade[]
@@ -621,7 +628,7 @@ model SyncQueueItem {
   entityType      String    @map("entity_type") // 'submission' | 'grade' | 'feedback_comment' | ...
   entityId        String    @map("entity_id")
   operation       String // 'insert' | 'update' | 'delete'
-  payload         Json
+  payload         String // JSON-encoded — see json.util.ts header note
   clientVersion   Int       @map("client_version") // entity's `version` as known to the client
   status          String    @default("pending") // 'pending' | 'syncing' | 'synced' | 'conflict' | 'failed'
   createdAtClient DateTime  @map("created_at_client")
@@ -640,8 +647,8 @@ model SyncConflict {
   syncQueueId            String    @map("sync_queue_id")
   entityType             String    @map("entity_type")
   entityId               String    @map("entity_id")
-  serverVersionSnapshot  Json      @map("server_version_snapshot")
-  clientVersionSnapshot  Json      @map("client_version_snapshot")
+  serverVersionSnapshot  String    @map("server_version_snapshot") // JSON-encoded — see json.util.ts header note
+  clientVersionSnapshot  String    @map("client_version_snapshot") // JSON-encoded — see json.util.ts header note
   status                 String    @default("open") // 'open' | 'resolved'
   resolvedBy             String?   @map("resolved_by")
   resolvedAt             DateTime? @map("resolved_at")
@@ -663,8 +670,8 @@ model AuditLog {
   action        String // e.g. 'grade.update', 'trainee.eradicate', 'login.success'
   entityType    String   @map("entity_type")
   entityId      String?  @map("entity_id")
-  beforeValue   Json?    @map("before_value")
-  afterValue    Json?    @map("after_value")
+  beforeValue   String?  @map("before_value") // JSON-encoded — see json.util.ts header note
+  afterValue    String?  @map("after_value") // JSON-encoded — see json.util.ts header note
   ipAddress     String?  @map("ip_address")
   institutionId String?  @map("institution_id")
   occurredAt    DateTime @default(now()) @map("occurred_at")
@@ -682,8 +689,8 @@ model AiRecommendationLog {
   id                 String    @id @default(uuid())
   traineeId          String?   @map("trainee_id")
   recommendationType String    @map("recommendation_type") // 'personalization' | 'at_risk_flag' | 'intervention_suggestion' | 'content_adaptation'
-  inputDataRef       Json?     @map("input_data_ref") // pointers/aggregates, never raw PII
-  suggestion         Json
+  inputDataRef       String?   @map("input_data_ref") // JSON-encoded pointers/aggregates, never raw PII — see json.util.ts header note
+  suggestion         String // JSON-encoded — see json.util.ts header note
   modelVersion       String    @map("model_version")
   generatedAt        DateTime  @default(now()) @map("generated_at")
   status             String    @default("pending") // 'pending' | 'accepted' | 'rejected'

@@ -3,7 +3,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
-import { toJsonSafe } from '../../common/utils/json.util';
+import { toJsonString } from '../../common/utils/json.util';
 import { AutoGradeDto, ManualGradeDto, ReviewGradeDto } from './dto/grade.dto';
 
 // Implements the Grading step of the upload→certification data flow (architecture.md) and the
@@ -25,7 +25,7 @@ export class GradingService {
     const submission = await this.getSubmissionForGrading(submissionId, actor);
 
     const autoGradeLog = await this.prisma.autoGradeLog.create({
-      data: { submissionId, engineVersion: dto.engineVersion, rawResult: dto.rawResult },
+      data: { submissionId, engineVersion: dto.engineVersion, rawResult: toJsonString(dto.rawResult) },
     });
 
     const grade = await this.prisma.grade.upsert({
@@ -73,7 +73,7 @@ export class GradingService {
           entityType: 'grade',
           entityId: existing.id,
           operation: 'update',
-          payload: { score: dto.score, expectedVersion: dto.expectedVersion },
+          payload: toJsonString({ score: dto.score, expectedVersion: dto.expectedVersion }),
           clientVersion: dto.expectedVersion,
           status: 'conflict',
           createdAtClient: new Date(),
@@ -84,8 +84,8 @@ export class GradingService {
           syncQueueId: conflictQueueEntry.id,
           entityType: 'grade',
           entityId: existing.id,
-          serverVersionSnapshot: toJsonSafe(existing),
-          clientVersionSnapshot: toJsonSafe({ score: dto.score, version: dto.expectedVersion }),
+          serverVersionSnapshot: toJsonString(existing),
+          clientVersionSnapshot: toJsonString({ score: dto.score, version: dto.expectedVersion }),
         },
       });
       throw new ConflictException({
