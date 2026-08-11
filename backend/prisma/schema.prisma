@@ -25,6 +25,12 @@
 //   - Postgres-only native type attributes (`@db.Uuid`, `@db.Decimal(x,y)`, `@db.Date`) are
 //     removed; IDs are still UUID strings (Prisma generates them client-side via `@default(uuid())`,
 //     which isn't Postgres-specific), just without the native column type annotation.
+//   - `AuditLog.id` is `String @default(uuid())`, not `BigInt @default(autoincrement())`
+//     (the closer match to database-design.md's `BIGSERIAL`) — Prisma's `autoincrement()`
+//     default isn't reliably applied at the DB level on SQLite, which caused every audit write to
+//     fail with a NOT NULL violation on `id`. Every other model already used the client-generated
+//     UUID pattern for exactly this reason (see the relation-modeling note below); AuditLog was
+//     the one holdout and is now consistent with the rest of the schema.
 // When you're ready to add Postgres/MinIO/Redis back (docker-compose.yml in the repo root already
 // has them configured), revert this file from git history and follow the original steps in
 // backend/README.md's "Moving to the full stack" section.
@@ -665,7 +671,13 @@ model SyncConflict {
 // ============================================================
 
 model AuditLog {
-  id            BigInt   @id @default(autoincrement())
+  // Every other model in this schema uses a client-generated `String @default(uuid())` id — this
+  // one used `BigInt @default(autoincrement())` instead (closer to database-design.md's original
+  // `BIGSERIAL`), but Prisma's `autoincrement()` default isn't reliably applied at the DB level
+  // for SQLite, which caused inserts to fail with a NOT NULL violation on `id`. Switched to the
+  // same client-generated UUID pattern as everything else so it never depends on a DB-side
+  // default mechanism, regardless of provider.
+  id            String   @id @default(uuid())
   actorId       String?  @map("actor_id")
   action        String // e.g. 'grade.update', 'trainee.eradicate', 'login.success'
   entityType    String   @map("entity_type")
