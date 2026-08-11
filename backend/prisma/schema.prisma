@@ -1,0 +1,696 @@
+// TVET e-Gateway — Prisma schema
+// Translated from ../../docs/database-design.md — keep the two in sync when either changes.
+//
+// ============================================================================================
+// LOCAL DEV MODE: SQLite, not the PostgreSQL target from architecture.md/database-design.md.
+// ============================================================================================
+// This lets the whole backend run with nothing installed beyond Node.js — no Docker, no Postgres
+// server, no separate DB process at all (SQLite is just a file, prisma/dev.db). This is a
+// deliberate, temporary substitution for local development only. Differences from the documented
+// design, and why they're safe for now:
+//   - `Decimal` fields (scores, GPA, weights) are `Float` here — SQLite has no native DECIMAL
+//     type. Fine for local dev/demo; switch back to Decimal when moving to Postgres, since exact
+//     decimal arithmetic matters more once real grading data is on the line.
+//   - `String[]` scalar lists (Assignment.allowedFileTypes, Resource.tags) are JSON-encoded
+//     `String` columns instead — SQLite has no native array type. See
+//     src/common/utils/json-array.util.ts for the serialize/deserialize helpers; API request/
+//     response shapes are unchanged (still plain string arrays over HTTP).
+//   - Postgres-only native type attributes (`@db.Uuid`, `@db.Decimal(x,y)`, `@db.Date`) are
+//     removed; IDs are still UUID strings (Prisma generates them client-side via `@default(uuid())`,
+//     which isn't Postgres-specific), just without the native column type annotation.
+// When you're ready to add Postgres/MinIO/Redis back (docker-compose.yml in the repo root already
+// has them configured), revert this file from git history and follow the original steps in
+// backend/README.md's "Moving to the full stack" section.
+//
+// Relation modeling convention (documented in database-design.md §3 intro):
+//   - Core business relations (institution/trade/module/trainee/submission chains, device links)
+//     are modeled as full Prisma relations with navigable back-relations.
+//   - Generic "who touched this" audit pointer columns (created_by, updated_by, grader_id,
+//     approved_by, uploaded_by, actor_id, reviewed_by, requested_by, confirmed_by, resolved_by,
+//     issued_by, author_id) are plain `String` scalars, NOT Prisma relations. Modeling every one
+//     of these as a full relation would force ~20 back-relation arrays onto User for fields the
+//     app never needs to navigate in reverse. They still logically reference users.id; enforce
+//     the FK constraint via a manual migration edit if DB-level enforcement is required.
+//   - Enumerated values are plain String columns validated at the DTO layer (class-validator),
+//     not Prisma/Postgres native enums — mirrors database-design.md's CHECK-constraint-over-ENUM
+//     decision so the Ministry can extend allowed values without an ALTER TYPE migration.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// INSTITUTIONS & TRADES
+// ============================================================
+
+model Institution {
+  id            String   @id @default(uuid())
+  name          String
+  type          String // 'TTI' | 'IZC'
+  code          String   @unique
+  address       String?
+  contactNumber String?  @map("contact_number")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  createdBy     String?  @map("created_by")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedBy     String?  @map("updated_by")
+  version       Int      @default(1)
+
+  users         User[]
+  classes       Class[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+
+  @@map("institutions")
+}
+
+model Trade {
+  id             String   @id @default(uuid())
+  code           String   @unique
+  nameEn         String   @map("name_en")
+  nameDz         String?  @map("name_dz")
+  descriptionEn  String?  @map("description_en")
+  descriptionDz  String?  @map("description_dz")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+  version        Int      @default(1)
+
+  traineeProfiles TraineeProfile[]
+  modules         Module[]
+  classes         Class[]
+
+  @@map("trades")
+}
+
+// ============================================================
+// USERS & ROLES
+// ============================================================
+
+model Role {
+  id          String @id @default(uuid())
+  name        String @unique // 'trainee' | 'trainer' | 'admin' | 'exam_controller'
+  description String?
+
+  userRoles UserRole[]
+
+  @@map("roles")
+}
+
+model User {
+  id               String    @id @default(uuid())
+  institutionId    String    @map("institution_id")
+  loginId          String    @unique @map("login_id") // Student ID or Staff ID
+  email            String?   @unique
+  passwordHash     String    @map("password_hash") // argon2id
+  status           String    @default("active") // 'active' | 'suspended' | 'deactivated'
+  localePreference String    @default("en") @map("locale_preference") // 'en' | 'dz'
+  lastLoginAt      DateTime? @map("last_login_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy        String?   @map("updated_by")
+  version          Int       @default(1)
+
+  institution    Institution              @relation(fields: [institutionId], references: [id])
+  userRoles      UserRole[]
+  traineeProfile TraineeProfile?
+  trainerProfile TrainerProfile?
+  devices        Device[]
+  notifRecipient NotificationRecipient[]
+
+  @@map("users")
+}
+
+model UserRole {
+  userId     String   @map("user_id")
+  roleId     String   @map("role_id")
+  assignedAt DateTime @default(now()) @map("assigned_at")
+  assignedBy String?  @map("assigned_by")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// ============================================================
+// PROFILES
+// ============================================================
+
+model TraineeProfile {
+  userId          String   @id @map("user_id")
+  fullName        String   @map("full_name")
+  citizenshipId   String   @unique @map("citizenship_id")
+  profilePhotoUrl String?  @map("profile_photo_url")
+  contactNumber   String?  @map("contact_number")
+  tradeId         String?  @map("trade_id")
+  enrollmentDate  DateTime @map("enrollment_date")
+  status          String   @default("active") // 'active' | 'completed' | 'eradicated' | 'withdrawn'
+  createdAt       DateTime @default(now()) @map("created_at")
+  createdBy       String?  @map("created_by")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedBy       String?  @map("updated_by")
+  version         Int      @default(1)
+
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trade               Trade?               @relation(fields: [tradeId], references: [id])
+  eradicationRequests EradicationRequest[]
+  classEnrollments    ClassEnrollment[]
+  moduleTrainees      ModuleTrainee[]
+  submissions         Submission[]
+  results             Result[]
+  aiRecommendations   AiRecommendationLog[]
+
+  @@map("trainee_profiles")
+}
+
+model TrainerProfile {
+  userId         String   @id @map("user_id")
+  fullName       String   @map("full_name")
+  staffId        String   @unique @map("staff_id")
+  specialization String?
+  contactNumber  String?  @map("contact_number")
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+  version        Int      @default(1)
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tutoredModules  Module[]         @relation("ModuleTutor")
+  moduleTrainers  ModuleTrainer[]
+
+  @@map("trainer_profiles")
+}
+
+model EradicationRequest {
+  id            String    @id @default(uuid())
+  traineeId     String    @map("trainee_id")
+  requestedBy   String    @map("requested_by")
+  requestedAt   DateTime  @default(now()) @map("requested_at")
+  reason        String?
+  status        String    @default("pending_confirmation") // 'pending_confirmation' | 'confirmed' | 'cancelled'
+  confirmedBy   String?   @map("confirmed_by")
+  confirmedAt   DateTime? @map("confirmed_at")
+
+  trainee TraineeProfile @relation(fields: [traineeId], references: [userId])
+
+  @@map("eradication_requests")
+}
+
+// ============================================================
+// CLASSES
+// ============================================================
+
+model Class {
+  id            String    @id @default(uuid())
+  institutionId String    @map("institution_id")
+  tradeId       String    @map("trade_id")
+  name          String
+  intakeYear    Int       @map("intake_year")
+  startDate     DateTime  @map("start_date")
+  endDate       DateTime? @map("end_date")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  createdBy     String?   @map("created_by")
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy     String?   @map("updated_by")
+  version       Int       @default(1)
+
+  institution Institution       @relation(fields: [institutionId], references: [id])
+  trade       Trade             @relation(fields: [tradeId], references: [id])
+  enrollments ClassEnrollment[]
+
+  @@map("classes")
+}
+
+model ClassEnrollment {
+  classId    String   @map("class_id")
+  traineeId  String   @map("trainee_id")
+  enrolledAt DateTime @default(now()) @map("enrolled_at")
+  status     String   @default("active") // 'active' | 'completed' | 'withdrawn'
+
+  class   Class          @relation(fields: [classId], references: [id], onDelete: Cascade)
+  trainee TraineeProfile @relation(fields: [traineeId], references: [userId], onDelete: Cascade)
+
+  @@id([classId, traineeId])
+  @@map("class_enrollments")
+}
+
+// ============================================================
+// MODULES
+// ============================================================
+
+model Module {
+  id               String   @id @default(uuid())
+  code             String   @unique
+  nameEn           String   @map("name_en")
+  nameDz           String?  @map("name_dz")
+  ncsCode          String?  @map("ncs_code")
+  tradeId          String   @map("trade_id")
+  durationWeeks    Int      @map("duration_weeks")
+  learningOutcome  String?  @map("learning_outcome")
+  startDate        DateTime @map("start_date")
+  endDate          DateTime @map("end_date")
+  moduleTutorId    String?  @map("module_tutor_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+  createdBy        String?  @map("created_by")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedBy        String?  @map("updated_by")
+  version          Int      @default(1)
+
+  trade          Trade            @relation(fields: [tradeId], references: [id])
+  moduleTutor    TrainerProfile?  @relation("ModuleTutor", fields: [moduleTutorId], references: [userId])
+  moduleTrainees ModuleTrainee[]
+  moduleTrainers ModuleTrainer[]
+  assessments    Assessment[]
+  resources      Resource[]
+  results        Result[]
+
+  @@map("modules")
+}
+
+model ModuleTrainee {
+  moduleId   String   @map("module_id")
+  traineeId  String   @map("trainee_id")
+  status     String   @default("active") // 'active' | 'completed' | 'repeat' | 'withdrawn'
+  enrolledAt DateTime @default(now()) @map("enrolled_at")
+
+  module  Module         @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  trainee TraineeProfile @relation(fields: [traineeId], references: [userId], onDelete: Cascade)
+
+  @@id([moduleId, traineeId])
+  @@map("module_trainees")
+}
+
+model ModuleTrainer {
+  moduleId  String @map("module_id")
+  trainerId String @map("trainer_id")
+  roleLabel String @default("assistant") @map("role_label") // 'tutor' | 'assistant'
+
+  module  Module         @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  trainer TrainerProfile @relation(fields: [trainerId], references: [userId], onDelete: Cascade)
+
+  @@id([moduleId, trainerId])
+  @@map("module_trainers")
+}
+
+// ============================================================
+// ASSESSMENTS, ASSIGNMENTS, SUBMISSIONS
+// ============================================================
+
+model Assessment {
+  id            String    @id @default(uuid())
+  moduleId      String    @map("module_id")
+  tier          String // 'formative' | 'diagnostic' | 'summative'
+  subtype       String // 'continuous_assessment' | 'project_based' | 'class_test' | 'problem_based' | 'module_assessment' | 'institutional_assessment'
+  title         String
+  maxScore      Float     @map("max_score")
+  weightPercent Float?    @map("weight_percent")
+  scheduledDate DateTime? @map("scheduled_date")
+  status        String    @default("draft") // 'draft' | 'scheduled' | 'approved' | 'completed' | 'cancelled'
+  createdBy     String    @map("created_by")
+  approvedBy    String?   @map("approved_by") // Exam Controller
+  approvedAt    DateTime? @map("approved_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy     String?   @map("updated_by")
+  version       Int       @default(1)
+
+  module      Module       @relation(fields: [moduleId], references: [id])
+  assignments Assignment[]
+
+  @@map("assessments")
+}
+
+model Assignment {
+  id               String   @id @default(uuid())
+  assessmentId     String   @map("assessment_id")
+  title            String
+  description      String?
+  allowedFileTypes String   @default("[]") @map("allowed_file_types") // JSON-encoded string[] — see schema header note
+  dueDate          DateTime @map("due_date")
+  createdBy        String   @map("created_by")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedBy        String?  @map("updated_by")
+  version          Int      @default(1)
+
+  assessment  Assessment   @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  submissions Submission[]
+
+  @@map("assignments")
+}
+
+model Submission {
+  id             String    @id @default(uuid()) // client-generatable offline
+  assignmentId   String    @map("assignment_id")
+  traineeId      String    @map("trainee_id")
+  submittedAt    DateTime? @map("submitted_at")
+  status         String    @default("draft") // 'draft' | 'queued' | 'submitted' | 'late' | 'graded'
+  originDeviceId String?   @map("origin_device_id")
+  syncStatus     String    @default("synced") @map("sync_status") // 'local_only' | 'pending_sync' | 'synced' | 'conflict'
+  syncedAt       DateTime? @map("synced_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  version        Int       @default(1)
+
+  assignment Assignment         @relation(fields: [assignmentId], references: [id])
+  trainee    TraineeProfile     @relation(fields: [traineeId], references: [userId])
+  device     Device?            @relation(fields: [originDeviceId], references: [id])
+  files      SubmissionFile[]
+  grade      Grade?
+  comments   FeedbackComment[]
+
+  @@unique([assignmentId, traineeId])
+  @@map("submissions")
+}
+
+model SubmissionFile {
+  id              String   @id @default(uuid())
+  submissionId    String   @map("submission_id")
+  filename        String
+  fileUrl         String?  @map("file_url") // object storage key; null until synced
+  fileHash        String   @map("file_hash") // SHA-256, computed client-side
+  fileSizeBytes   BigInt?  @map("file_size_bytes")
+  uploadedAt      DateTime @default(now()) @map("uploaded_at")
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@map("submission_files")
+}
+
+// ============================================================
+// GRADING & FEEDBACK
+// ============================================================
+
+model AutoGradeLog {
+  id            String   @id @default(uuid())
+  submissionId  String   @map("submission_id")
+  engineVersion String   @map("engine_version")
+  rawResult     Json     @map("raw_result") // per-question breakdown for MCQ
+  gradedAt      DateTime @default(now()) @map("graded_at")
+
+  grades Grade[]
+
+  @@map("auto_grade_logs")
+}
+
+model Grade {
+  id             String    @id @default(uuid())
+  submissionId   String    @unique @map("submission_id")
+  graderId       String?   @map("grader_id") // null if purely auto-graded
+  score          Float
+  isAutoGraded   Boolean   @default(false) @map("is_auto_graded")
+  autoGradeLogId String?   @map("auto_grade_log_id")
+  gradingStatus  String    @default("pending") @map("grading_status") // 'pending' | 'auto_graded' | 'manually_graded' | 'reviewed' | 'disputed'
+  gradedAt       DateTime? @map("graded_at")
+  originDeviceId String?   @map("origin_device_id")
+  syncStatus     String    @default("synced") @map("sync_status") // 'local_only' | 'pending_sync' | 'synced' | 'conflict'
+  syncedAt       DateTime? @map("synced_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  version        Int       @default(1)
+
+  submission   Submission    @relation(fields: [submissionId], references: [id])
+  autoGradeLog AutoGradeLog? @relation(fields: [autoGradeLogId], references: [id])
+  device       Device?       @relation(fields: [originDeviceId], references: [id])
+
+  @@map("grades")
+}
+
+model FeedbackComment {
+  id              String    @id @default(uuid())
+  submissionId    String    @map("submission_id")
+  parentCommentId String?   @map("parent_comment_id")
+  authorId        String    @map("author_id")
+  commentText     String?   @map("comment_text")
+  voiceNoteUrl    String?   @map("voice_note_url")
+  readStatus      Boolean   @default(false) @map("read_status")
+  originDeviceId  String?   @map("origin_device_id")
+  syncStatus      String    @default("synced") @map("sync_status") // 'local_only' | 'pending_sync' | 'synced' | 'conflict'
+  syncedAt        DateTime? @map("synced_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  submission Submission        @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  parent     FeedbackComment?  @relation("CommentThread", fields: [parentCommentId], references: [id])
+  replies    FeedbackComment[] @relation("CommentThread")
+  device     Device?           @relation(fields: [originDeviceId], references: [id])
+
+  @@map("feedback_comments")
+}
+
+// ============================================================
+// RESULTS, CERTIFICATES
+// ============================================================
+
+model Result {
+  id                      String    @id @default(uuid())
+  traineeId               String    @map("trainee_id")
+  moduleId                String    @map("module_id")
+  totalScore              Float     @map("total_score")
+  mark                    String // 'A' | 'B' | 'C' | 'D' | 'E'
+  gpa                     Float
+  performanceDescription  String    @map("performance_description")
+  outcome                 String // 'certified' | 'repeat_module'
+  computedAt              DateTime  @default(now()) @map("computed_at")
+  approvedBy              String?   @map("approved_by") // Exam Controller
+  approvedAt              DateTime? @map("approved_at")
+  status                  String    @default("pending_approval") // 'pending_approval' | 'approved' | 'disputed'
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @default(now()) @updatedAt @map("updated_at")
+  version                 Int       @default(1)
+
+  trainee     TraineeProfile @relation(fields: [traineeId], references: [userId])
+  module      Module         @relation(fields: [moduleId], references: [id])
+  certificate Certificate?
+
+  @@unique([traineeId, moduleId])
+  @@map("results")
+}
+
+model Certificate {
+  id                String    @id @default(uuid())
+  resultId          String    @unique @map("result_id")
+  certificateNumber String    @unique @map("certificate_number")
+  fileUrl           String?   @map("file_url")
+  status            String    @default("draft") // 'draft' | 'approved' | 'revoked'
+  issuedBy          String?   @map("issued_by")
+  issuedAt          DateTime? @map("issued_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
+  version           Int       @default(1)
+
+  result Result @relation(fields: [resultId], references: [id])
+
+  @@map("certificates")
+}
+
+// ============================================================
+// RESOURCES
+// ============================================================
+
+model Resource {
+  id               String    @id @default(uuid())
+  titleEn          String    @map("title_en")
+  titleDz          String?   @map("title_dz")
+  moduleId         String?   @map("module_id")
+  ncsCode          String?   @map("ncs_code")
+  format           String
+  language         String    @default("en") // 'en' | 'dz' | 'both'
+  fileUrl          String    @map("file_url")
+  fileHash         String    @map("file_hash")
+  dateAdded        DateTime  @default(now()) @map("date_added")
+  lastReviewedDate DateTime? @map("last_reviewed_date")
+  uploadedBy       String    @map("uploaded_by")
+  permissionLevel  String    @default("institution") @map("permission_level") // 'public' | 'institution' | 'module_only' | 'trainer_only'
+  tags             String    @default("[]") // JSON-encoded string[] — see schema header note
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+  updatedBy        String?   @map("updated_by")
+  version          Int       @default(1)
+
+  module      Module?              @relation(fields: [moduleId], references: [id])
+  reviews     ResourceReview[]
+  accessLogs  ResourceAccessLog[]
+
+  @@map("resources")
+}
+
+model ResourceReview {
+  id         String   @id @default(uuid())
+  resourceId String   @map("resource_id")
+  reviewerId String   @map("reviewer_id")
+  reviewedAt DateTime @default(now()) @map("reviewed_at")
+  notes      String?
+
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@map("resource_reviews")
+}
+
+model ResourceAccessLog {
+  id             String    @id @default(uuid())
+  resourceId     String    @map("resource_id")
+  userId         String    @map("user_id")
+  action         String // 'view' | 'download' | 'search_hit'
+  searchQuery    String?   @map("search_query")
+  originDeviceId String?   @map("origin_device_id")
+  syncStatus     String    @default("synced") @map("sync_status") // 'local_only' | 'pending_sync' | 'synced'
+  syncedAt       DateTime? @map("synced_at")
+  occurredAt     DateTime  @default(now()) @map("occurred_at")
+
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  device   Device?  @relation(fields: [originDeviceId], references: [id])
+
+  @@map("resource_access_logs")
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+model Notification {
+  id                 String   @id @default(uuid())
+  type               String // 'submission_deadline' | 'grading_complete' | 'new_resource' | 'result_declaration' | 'assessment_schedule' | 'general'
+  title              String
+  body               String?
+  relatedEntityType  String?  @map("related_entity_type")
+  relatedEntityId    String?  @map("related_entity_id")
+  institutionId      String?  @map("institution_id") // null = Ministry-wide broadcast
+  priority           String   @default("normal") // 'normal' | 'high' | 'critical'
+  channelHint        String   @default("in_app") @map("channel_hint") // 'in_app' | 'push' | 'sms'
+  createdBy          String?  @map("created_by")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  institution Institution?             @relation(fields: [institutionId], references: [id])
+  recipients  NotificationRecipient[]
+
+  @@map("notifications")
+}
+
+model NotificationRecipient {
+  notificationId String    @map("notification_id")
+  userId         String    @map("user_id")
+  deliveredAt    DateTime? @map("delivered_at")
+  readAt         DateTime? @map("read_at")
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([notificationId, userId])
+  @@map("notification_recipients")
+}
+
+// ============================================================
+// OFFLINE SYNC TRACKING
+// ============================================================
+
+model Device {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  deviceType    String    @map("device_type") // 'mobile' | 'desktop' | 'web'
+  installId     String    @unique @map("install_id")
+  lastSyncedAt  DateTime? @map("last_synced_at")
+  registeredAt  DateTime  @default(now()) @map("registered_at")
+
+  user                User                @relation(fields: [userId], references: [id])
+  syncQueueItems      SyncQueueItem[]
+  submissions         Submission[]
+  grades              Grade[]
+  feedbackComments    FeedbackComment[]
+  resourceAccessLogs  ResourceAccessLog[]
+
+  @@map("devices")
+}
+
+model SyncQueueItem {
+  id              String    @id @default(uuid())
+  deviceId        String    @map("device_id")
+  entityType      String    @map("entity_type") // 'submission' | 'grade' | 'feedback_comment' | ...
+  entityId        String    @map("entity_id")
+  operation       String // 'insert' | 'update' | 'delete'
+  payload         Json
+  clientVersion   Int       @map("client_version") // entity's `version` as known to the client
+  status          String    @default("pending") // 'pending' | 'syncing' | 'synced' | 'conflict' | 'failed'
+  createdAtClient DateTime  @map("created_at_client")
+  receivedAt      DateTime  @default(now()) @map("received_at")
+  syncedAt        DateTime? @map("synced_at")
+  errorMessage    String?   @map("error_message")
+
+  device    Device          @relation(fields: [deviceId], references: [id])
+  conflicts SyncConflict[]
+
+  @@map("sync_queue")
+}
+
+model SyncConflict {
+  id                     String    @id @default(uuid())
+  syncQueueId            String    @map("sync_queue_id")
+  entityType             String    @map("entity_type")
+  entityId               String    @map("entity_id")
+  serverVersionSnapshot  Json      @map("server_version_snapshot")
+  clientVersionSnapshot  Json      @map("client_version_snapshot")
+  status                 String    @default("open") // 'open' | 'resolved'
+  resolvedBy             String?   @map("resolved_by")
+  resolvedAt             DateTime? @map("resolved_at")
+  resolutionNotes        String?   @map("resolution_notes")
+  createdAt              DateTime  @default(now()) @map("created_at")
+
+  syncQueueItem SyncQueueItem @relation(fields: [syncQueueId], references: [id])
+
+  @@map("sync_conflicts")
+}
+
+// ============================================================
+// AUDIT LOGS (append-only — no update/delete at the application layer)
+// ============================================================
+
+model AuditLog {
+  id            BigInt   @id @default(autoincrement())
+  actorId       String?  @map("actor_id")
+  action        String // e.g. 'grade.update', 'trainee.eradicate', 'login.success'
+  entityType    String   @map("entity_type")
+  entityId      String?  @map("entity_id")
+  beforeValue   Json?    @map("before_value")
+  afterValue    Json?    @map("after_value")
+  ipAddress     String?  @map("ip_address")
+  institutionId String?  @map("institution_id")
+  occurredAt    DateTime @default(now()) @map("occurred_at")
+
+  institution Institution? @relation(fields: [institutionId], references: [id])
+
+  @@map("audit_logs")
+}
+
+// ============================================================
+// AI RECOMMENDATION LOGS
+// ============================================================
+
+model AiRecommendationLog {
+  id                 String    @id @default(uuid())
+  traineeId          String?   @map("trainee_id")
+  recommendationType String    @map("recommendation_type") // 'personalization' | 'at_risk_flag' | 'intervention_suggestion' | 'content_adaptation'
+  inputDataRef       Json?     @map("input_data_ref") // pointers/aggregates, never raw PII
+  suggestion         Json
+  modelVersion       String    @map("model_version")
+  generatedAt        DateTime  @default(now()) @map("generated_at")
+  status             String    @default("pending") // 'pending' | 'accepted' | 'rejected'
+  reviewedBy         String?   @map("reviewed_by")
+  reviewedAt         DateTime? @map("reviewed_at")
+
+  trainee TraineeProfile? @relation(fields: [traineeId], references: [userId])
+
+  @@map("ai_recommendation_logs")
+}
