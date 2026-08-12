@@ -3,6 +3,16 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 
+// BigInt (submission_files.fileSizeBytes) has no native JSON representation — Express's
+// res.json() calls JSON.stringify directly on whatever a controller returns, which throws
+// "Do not know how to serialize a BigInt" the first time a submission with a file size reaches
+// a client. Date and Prisma.Decimal already serialize correctly because they define their own
+// toJSON(); this gives BigInt the same treatment app-wide instead of converting it at every
+// individual call site that happens to return a SubmissionFile.
+(BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function (this: bigint) {
+  return Number(this);
+};
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
